@@ -1,0 +1,8 @@
+# Caddy ขอและต่ออายุใบรับรอง HTTPS (Let's Encrypt) ให้อัตโนมัติ
+{$DOMAIN} {
+	encode gzip
+	request_body {
+		max_size 520MB
+	}
+	reverse_proxy app:3000
+}

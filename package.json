@@ -1,0 +1,12 @@
+{
+  "name": "klangklip",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "คลังคลิป - คลังวิดีโอขายสินค้า ตั้งเวลาโพสต์ TikTok / Facebook / Instagram",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/smoke.mjs && node test/failure.mjs && node test/facebook.mjs && node test/captions.mjs"
+  },
+  "engines": { "node": ">=20" }
+}
