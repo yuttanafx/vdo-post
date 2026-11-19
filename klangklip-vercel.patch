@@ -1,0 +1,166 @@
+From 3374ba44b6e0db97d3ea3209969dab8c0982407f Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 19 Nov 2026 09:51:37 +0000
+Subject: [PATCH] =?UTF-8?q?=E0=B8=A3=E0=B8=AD=E0=B8=87=E0=B8=A3=E0=B8=B1?=
+ =?UTF-8?q?=E0=B8=9A=20Vercel=20(=E0=B9=82=E0=B8=AB=E0=B8=A1=E0=B8=94?=
+ =?UTF-8?q?=E0=B8=97=E0=B8=94=E0=B8=AA=E0=B8=AD=E0=B8=9A):=20handler,=20/t?=
+ =?UTF-8?q?mp,=20vercel.json?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ api/index.js    |  2 ++
+ lib/security.js |  8 +++++++-
+ lib/store.js    |  3 ++-
+ server.js       | 27 ++++++++++++++++++---------
+ vercel.json     | 10 ++++++++++
+ 5 files changed, 39 insertions(+), 11 deletions(-)
+ create mode 100644 api/index.js
+ create mode 100644 vercel.json
+
+diff --git a/api/index.js b/api/index.js
+new file mode 100644
+index 0000000..afd965f
+--- /dev/null
++++ b/api/index.js
+@@ -0,0 +1,2 @@
++// จุดเข้าของ Vercel: ส่งทุกคำขอ /api/* และ /media/* ไปที่ handler ของ server.js
++export { default } from '../server.js';
+diff --git a/lib/security.js b/lib/security.js
+index c0273bc..c8fabdf 100644
+--- a/lib/security.js
++++ b/lib/security.js
+@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
+ import fs from 'node:fs';
+ import path from 'node:path';
+ 
+-const DATA = path.resolve(process.env.DATA_DIR || 'data');
++const DATA = path.resolve(process.env.DATA_DIR || (process.env.VERCEL ? '/tmp/klangklip' : 'data'));
+ 
+ function loadKey(envName, file, bytes) {
+   const fromEnv = process.env[envName];
+@@ -12,6 +12,12 @@ function loadKey(envName, file, bytes) {
+     if (buf.length !== bytes) throw new Error(`${envName} ต้องเป็น hex ${bytes} ไบต์`);
+     return buf;
+   }
++  if (process.env.VERCEL) {
++    // Vercel มีหลาย instance และดิสก์ไม่ถาวร กุญแจสุ่มจะทำให้เซสชันหลุดสลับกัน → ใช้ค่าคงที่
++    if (process.env.PLATFORM_MODE === 'live') throw new Error(`${envName} ต้องตั้งใน Environment Variables ของ Vercel (openssl rand -hex ${bytes})`);
++    console.warn(`[demo] ${envName} ไม่ได้ตั้ง ใช้ค่าที่คำนวณจากโปรเจกต์แทน (ใช้ทดสอบเท่านั้น)`);
++    return crypto.createHash('sha256').update(`${envName}:${process.env.VERCEL_PROJECT_ID || 'klangklip'}:${process.env.ADMIN_PASSWORD || ''}`).digest().subarray(0, bytes);
++  }
+   const f = path.join(DATA, file);
+   if (fs.existsSync(f)) return Buffer.from(fs.readFileSync(f, 'utf8').trim(), 'hex');
+   fs.mkdirSync(DATA, { recursive: true });
+diff --git a/lib/store.js b/lib/store.js
+index 6fb57bf..23797f1 100644
+--- a/lib/store.js
++++ b/lib/store.js
+@@ -3,7 +3,8 @@
+ import fs from 'node:fs';
+ import path from 'node:path';
+ 
+-const DATA = path.resolve(process.env.DATA_DIR || 'data');
++// บน Vercel ดิสก์เขียนได้เฉพาะ /tmp (ข้อมูลชั่วคราว หายเมื่อ function รีสตาร์ต)
++const DATA = path.resolve(process.env.DATA_DIR || (process.env.VERCEL ? '/tmp/klangklip' : 'data'));
+ const FILE = path.join(DATA, 'db.json');
+ const COLLECTIONS = ['users', 'clips', 'accounts', 'posts'];
+ 
+diff --git a/server.js b/server.js
+index 0617cfe..5a25c82 100644
+--- a/server.js
++++ b/server.js
+@@ -10,14 +10,17 @@ import { PLATFORMS, MODE, clipProblem } from './lib/platforms.js';
+ import { authUrl, pagesFromCode, fbConfigured } from './lib/facebook.js';
+ import { captionMode, generateCaptions } from './lib/captions.js';
+ import os from 'node:os';
+-import { startWorker } from './lib/worker.js';
++import { startWorker, tick } from './lib/worker.js';
+ 
+ const __dirname = path.dirname(fileURLToPath(import.meta.url));
+ const PUBLIC = path.join(__dirname, 'public');
+ const UPLOADS = path.join(store.DATA_DIR, 'uploads');
+ const THUMBS = path.join(store.DATA_DIR, 'thumbs');
+ const PORT = Number(process.env.PORT || 3000);
+-const MAX_UPLOAD = 500 * 1024 * 1024;
++const ON_VERCEL = !!process.env.VERCEL;
++// Vercel จำกัดขนาด request ราว 4.5 MB
++const MAX_UPLOAD = ON_VERCEL ? 4 * 1024 * 1024 : 500 * 1024 * 1024;
++const MAX_UPLOAD_LABEL = ON_VERCEL ? '4 MB (โหมดทดสอบบน Vercel)' : '500 MB';
+ const COOKIE = 'kk_sid';
+ 
+ // ---------- helpers ----------
+@@ -223,7 +226,7 @@ route('POST', '/api/admin/clips', { admin: true }, async (ctx) => {
+   const type = ctx.req.headers['content-type'] || '';
+   if (!type.startsWith('video/mp4') && !type.startsWith('video/quicktime')) throw bad('รองรับเฉพาะไฟล์ MP4 / MOV');
+   const declared = Number(ctx.req.headers['content-length'] || 0);
+-  if (declared > MAX_UPLOAD) throw new HttpError(413, 'ไฟล์ใหญ่เกิน 500 MB');
++  if (declared > MAX_UPLOAD) throw new HttpError(413, `ไฟล์ใหญ่เกิน ${MAX_UPLOAD_LABEL}`);
+   const file = `${newId('f')}.mp4`;
+   const dest = path.join(UPLOADS, file);
+   let size = 0;
+@@ -231,7 +234,7 @@ route('POST', '/api/admin/clips', { admin: true }, async (ctx) => {
+   try {
+     for await (const chunk of ctx.req) {
+       size += chunk.length;
+-      if (size > MAX_UPLOAD) throw new HttpError(413, 'ไฟล์ใหญ่เกิน 500 MB');
++      if (size > MAX_UPLOAD) throw new HttpError(413, `ไฟล์ใหญ่เกิน ${MAX_UPLOAD_LABEL}`);
+       if (!out.write(chunk)) await new Promise((r) => out.once('drain', r));
+     }
+     await new Promise((r) => out.end(r));
+@@ -443,8 +446,10 @@ route('DELETE', '/api/posts/:id', {}, (ctx) => {
+ // ---------- server ----------
+ const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
+ 
+-const server = http.createServer(async (req, res) => {
++const handler = async (req, res) => {
+   try {
++    // Vercel ไม่มีโปรเซสพื้นหลัง → ประมวลผลคิวที่ถึงเวลาแล้วทุกครั้งที่มีคนเรียก API
++    if (ON_VERCEL && req.url.startsWith('/api/')) await tick().catch((e) => console.error('worker error', e));
+     const url = new URL(req.url, 'http://x');
+     const pathname = decodeURIComponent(url.pathname);
+     const sec = { 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'same-origin' };
+@@ -477,7 +482,8 @@ const server = http.createServer(async (req, res) => {
+     if (status === 500) console.error(e);
+     json(res, status, { error: status === 500 ? 'เซิร์ฟเวอร์ผิดพลาด' : e.message });
+   }
+-});
++};
++const server = http.createServer(handler);
+ 
+ // ใส่คลิปตัวอย่างครั้งแรก (ถ้ามี SEED_CLIP)
+ async function seed() {
+@@ -491,7 +497,10 @@ async function seed() {
+ 
+ setupAdmin();
+ await seed();
+-startWorker(Number(process.env.WORKER_INTERVAL_MS || 10000));
+-server.listen(PORT, () => console.log(`คลังคลิป รันที่ http://localhost:${PORT}  (PLATFORM_MODE=${MODE})`));
++if (!ON_VERCEL) {
++  startWorker(Number(process.env.WORKER_INTERVAL_MS || 10000));
++  server.listen(PORT, () => console.log(`คลังคลิป รันที่ http://localhost:${PORT}  (PLATFORM_MODE=${MODE})`));
++}
+ 
+-export { server };
++export { server, handler };
++export default handler;
+diff --git a/vercel.json b/vercel.json
+new file mode 100644
+index 0000000..613a765
+--- /dev/null
++++ b/vercel.json
+@@ -0,0 +1,10 @@
++{
++  "$schema": "https://openapi.vercel.sh/vercel.json",
++  "functions": {
++    "api/index.js": { "maxDuration": 60, "includeFiles": "{public,lib}/**" }
++  },
++  "rewrites": [
++    { "source": "/api/:path*", "destination": "/api" },
++    { "source": "/media/:path*", "destination": "/api" }
++  ]
++}
+-- 
+2.43.0
+

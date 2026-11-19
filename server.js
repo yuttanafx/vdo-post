@@ -10,14 +10,17 @@ import { PLATFORMS, MODE, clipProblem } from './lib/platforms.js';
 import { authUrl, pagesFromCode, fbConfigured } from './lib/facebook.js';
 import { captionMode, generateCaptions } from './lib/captions.js';
 import os from 'node:os';
-import { startWorker } from './lib/worker.js';
+import { startWorker, tick } from './lib/worker.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(__dirname, 'public');
 const UPLOADS = path.join(store.DATA_DIR, 'uploads');
 const THUMBS = path.join(store.DATA_DIR, 'thumbs');
 const PORT = Number(process.env.PORT || 3000);
-const MAX_UPLOAD = 500 * 1024 * 1024;
+const ON_VERCEL = !!process.env.VERCEL;
+// Vercel จำกัดขนาด request ราว 4.5 MB
+const MAX_UPLOAD = ON_VERCEL ? 4 * 1024 * 1024 : 500 * 1024 * 1024;
+const MAX_UPLOAD_LABEL = ON_VERCEL ? '4 MB (โหมดทดสอบบน Vercel)' : '500 MB';
 const COOKIE = 'kk_sid';
 
 // ---------- helpers ----------
@@ -223,7 +226,7 @@ route('POST', '/api/admin/clips', { admin: true }, async (ctx) => {
   const type = ctx.req.headers['content-type'] || '';
   if (!type.startsWith('video/mp4') && !type.startsWith('video/quicktime')) throw bad('รองรับเฉพาะไฟล์ MP4 / MOV');
   const declared = Number(ctx.req.headers['content-length'] || 0);
-  if (declared > MAX_UPLOAD) throw new HttpError(413, 'ไฟล์ใหญ่เกิน 500 MB');
+  if (declared > MAX_UPLOAD) throw new HttpError(413, `ไฟล์ใหญ่เกิน ${MAX_UPLOAD_LABEL}`);
   const file = `${newId('f')}.mp4`;
   const dest = path.join(UPLOADS, file);
   let size = 0;
@@ -231,7 +234,7 @@ route('POST', '/api/admin/clips', { admin: true }, async (ctx) => {
   try {
     for await (const chunk of ctx.req) {
       size += chunk.length;
-      if (size > MAX_UPLOAD) throw new HttpError(413, 'ไฟล์ใหญ่เกิน 500 MB');
+      if (size > MAX_UPLOAD) throw new HttpError(413, `ไฟล์ใหญ่เกิน ${MAX_UPLOAD_LABEL}`);
       if (!out.write(chunk)) await new Promise((r) => out.once('drain', r));
     }
     await new Promise((r) => out.end(r));
@@ -443,8 +446,10 @@ route('DELETE', '/api/posts/:id', {}, (ctx) => {
 // ---------- server ----------
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
 
-const server = http.createServer(async (req, res) => {
+const handler = async (req, res) => {
   try {
+    // Vercel ไม่มีโปรเซสพื้นหลัง → ประมวลผลคิวที่ถึงเวลาแล้วทุกครั้งที่มีคนเรียก API
+    if (ON_VERCEL && req.url.startsWith('/api/')) await tick().catch((e) => console.error('worker error', e));
     const url = new URL(req.url, 'http://x');
     const pathname = decodeURIComponent(url.pathname);
     const sec = { 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'same-origin' };
@@ -477,7 +482,8 @@ const server = http.createServer(async (req, res) => {
     if (status === 500) console.error(e);
     json(res, status, { error: status === 500 ? 'เซิร์ฟเวอร์ผิดพลาด' : e.message });
   }
-});
+};
+const server = http.createServer(handler);
 
 // ใส่คลิปตัวอย่างครั้งแรก (ถ้ามี SEED_CLIP)
 async function seed() {
@@ -491,7 +497,10 @@ async function seed() {
 
 setupAdmin();
 await seed();
-startWorker(Number(process.env.WORKER_INTERVAL_MS || 10000));
-server.listen(PORT, () => console.log(`คลังคลิป รันที่ http://localhost:${PORT}  (PLATFORM_MODE=${MODE})`));
+if (!ON_VERCEL) {
+  startWorker(Number(process.env.WORKER_INTERVAL_MS || 10000));
+  server.listen(PORT, () => console.log(`คลังคลิป รันที่ http://localhost:${PORT}  (PLATFORM_MODE=${MODE})`));
+}
 
-export { server };
+export { server, handler };
+export default handler;
