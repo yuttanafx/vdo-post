@@ -29,7 +29,12 @@ const future = (ms) => new Date(Date.now() + ms).toISOString();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 try {
-  await t('ไม่ล็อกอินเรียก API ไม่ได้', async () => assert.equal((await anon.req('/api/clips')).status, 401));
+  await t('ไม่ล็อกอิน: ดูคลังคลิปได้ แต่เรียก API ที่เป็นของสมาชิกไม่ได้', async () => {
+    assert.equal((await anon.req('/api/clips')).status, 200);
+    const me = await anon.req('/api/me'); assert.equal(me.status, 200); assert.equal(me.body.user, null);
+    for (const path of ['/api/posts', '/api/accounts', '/api/admin/overview']) assert.equal((await anon.req(path)).status, 401, path);
+    assert.equal((await anon.req('/api/posts', { method: 'POST', body: {} })).status, 401);
+  });
   await t('แอดมินล็อกอิน / รหัสผิดถูกปฏิเสธ', async () => {
     assert.equal((await anon.req('/api/auth/login', { method: 'POST', body: { email: 'admin@klangklip.local', password: 'wrong' } })).status, 401);
     assert.equal((await admin.req('/api/auth/login', { method: 'POST', body: { email: 'admin@klangklip.local', password: 'adminpass1' } })).status, 200);
@@ -55,7 +60,7 @@ try {
     assert.equal((await a.req('/api/clips')).body.clips.length, 1);
     const r = await a.req(`/media/video/${clipId}`, { headers: { Range: 'bytes=0-9' } });
     assert.equal(r.status, 206); assert.equal(r.body.byteLength, 10);
-    assert.equal((await anon.req(`/media/video/${clipId}`)).status, 401);
+    assert.equal((await anon.req(`/media/video/${clipId}`)).status, 200); // ผู้เยี่ยมชมดูตัวอย่างคลิปได้
     assert.equal((await a.req(`/media/video/${clipId}`, { headers: { Range: 'bytes=999999999-' } })).status, 416);
   });
   let accA1, accA2, accB;

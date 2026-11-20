@@ -5,10 +5,10 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import * as store from './lib/store.js';
-import { hashPassword, verifyPassword, encryptToken, signSession, readSession, newId } from './lib/security.js';
+import { hashPassword, verifyPassword, encryptToken, decryptToken, signSession, readSession, newId } from './lib/security.js';
 import { PLATFORMS, MODE, clipProblem } from './lib/platforms.js';
 import { authUrl, pagesFromCode, fbConfigured } from './lib/facebook.js';
-import { captionMode, generateCaptions } from './lib/captions.js';
+import { captionMode, generateCaptions, validApiKey } from './lib/captions.js';
 import os from 'node:os';
 import { startWorker, tick } from './lib/worker.js';
 
@@ -46,6 +46,9 @@ async function readJson(req, limit = 1_000_000) {
 }
 
 const parseCookies = (h = '') => Object.fromEntries(h.split(';').map((s) => s.trim().split('=')).filter((p) => p[0]).map(([k, ...v]) => [k, v.join('=')]));
+// API key ของสมาชิกเอง (เข้ารหัสไว้ในฐานข้อมูล) — ถอดรหัสใช้เฉพาะตอนเรียก Anthropic ไม่ส่งออกหน้าเว็บ
+const userAiKey = (u) => { if (!u?.aiKeyEnc) return null; try { return decryptToken(u.aiKeyEnc); } catch { return null; } };
+const aiKeyView = (u) => ({ set: Boolean(u?.aiKeyEnc), hint: u?.aiKeyHint || null });
 const publicUser = (u) => ({ id: u.id, email: u.email, name: u.name, role: u.role });
 const str = (v, max, name) => {
   if (v == null) return '';
@@ -187,33 +190,48 @@ route('POST', '/api/auth/logout', { auth: false }, (ctx) => json(ctx.res, 200, {
 const connectModes = () => (MODE === 'mock'
   ? { tiktok: 'mock', facebook: 'mock', instagram: 'mock' }
   : { tiktok: 'none', facebook: fbConfigured() ? 'oauth' : 'none', instagram: 'none' });
-route('GET', '/api/me', {}, (ctx) => json(ctx.res, 200, { user: publicUser(ctx.user), platforms: PLATFORMS, mode: MODE, connect: connectModes(), aiCaption: captionMode() }));
+// ดูได้โดยไม่ต้องล็อกอิน: ถ้ายังไม่ล็อกอิน user = null (หน้าเว็บจะแสดงคลังคลิปแบบผู้เยี่ยมชม)
+route('GET', '/api/me', { auth: false }, (ctx) => json(ctx.res, 200, { user: ctx.user ? publicUser(ctx.user) : null, platforms: PLATFORMS, mode: MODE, connect: connectModes(), aiCaption: captionMode(userAiKey(ctx.user)), aiKey: aiKeyView(ctx.user) }));
+
+// ใส่/ลบ API key ของ Anthropic ของสมาชิกเอง (ใช้กับปุ่ม AI คิดคอนเทนต์)
+route('PUT', '/api/me/ai-key', {}, async (ctx) => {
+  const b = await readJson(ctx.req);
+  const key = String(b.key ?? '').trim();
+  if (!validApiKey(key)) throw new HttpError(400, 'API key ไม่ถูกต้อง (ต้องขึ้นต้นด้วย sk- และไม่มีช่องว่าง) — คัดลอกจาก console.anthropic.com');
+  store.update('users', ctx.user.id, { aiKeyEnc: encryptToken(key), aiKeyHint: key.slice(-4) });
+  json(ctx.res, 200, { aiKey: aiKeyView(store.find('users', ctx.user.id)) });
+});
+route('DELETE', '/api/me/ai-key', {}, (ctx) => {
+  store.update('users', ctx.user.id, { aiKeyEnc: null, aiKeyHint: null });
+  json(ctx.res, 200, { aiKey: aiKeyView(store.find('users', ctx.user.id)) });
+});
 
 // สร้างแคปชันด้วย AI จากเฟรมคลิป + ข้อมูลสินค้า → ตัวเลือก 3 แบบ (ยังไม่บันทึกอะไร ผู้ใช้เลือกเองแล้วค่อยกดตั้งเวลา)
 route('POST', '/api/captions/generate', {}, async (ctx) => {
-  const mode = captionMode();
-  if (mode === 'off') throw new HttpError(501, 'ยังไม่ได้เปิดใช้ AI — ผู้ดูแลต้องตั้ง ANTHROPIC_API_KEY ที่เซิร์ฟเวอร์');
+  const apiKey = userAiKey(ctx.user);
+  const mode = captionMode(apiKey);
+  if (mode === 'off') throw new HttpError(501, 'ยังไม่ได้ใส่ API key — ไปที่เมนู "บัญชีของฉัน" เพื่อใส่ API key ของคุณก่อนใช้ AI คิดคอนเทนต์');
   const b = await readJson(ctx.req);
   const clip = store.find('clips', b.clipId); if (!clip) throw new HttpError(404, 'ไม่พบคลิป');
   const tone = str(b.tone, 100, 'น้ำเสียง'); const hint = str(b.hint, 300, 'ข้อมูลเพิ่มเติม');
   aiRate(ctx.user.id);
   const frames = mode === 'ai' ? await sampleFrames(clip) : [];
-  const captions = await generateCaptions({ mode, clip, frames, tone, hint });
+  const captions = await generateCaptions({ mode, clip, frames, tone, hint, apiKey });
   json(ctx.res, 200, { captions, mock: mode === 'mock', usedFrames: frames.length });
 });
 
-// คลังคลิป (ทุกคนที่ล็อกอินดูได้)
+// คลังคลิป (ทุกคนดูได้โดยไม่ต้องล็อกอิน — ตั้งเวลาโพสต์ต้องล็อกอิน)
 const clipView = (c) => ({ ...c, file: undefined, videoUrl: `/media/video/${c.id}`, thumbUrl: c.thumb ? `/media/thumb/${c.id}` : null });
-route('GET', '/api/clips', {}, (ctx) => {
+route('GET', '/api/clips', { auth: false }, (ctx) => {
   const q = (ctx.url.searchParams.get('q') || '').toLowerCase();
   const list = store.all('clips').filter((c) => !q || [c.title, c.product, c.caption, ...(c.hashtags || [])].join(' ').toLowerCase().includes(q));
   json(ctx.res, 200, { clips: list.map(clipView).reverse() });
 });
-route('GET', '/media/video/:id', {}, (ctx) => {
+route('GET', '/media/video/:id', { auth: false }, (ctx) => {
   const c = store.find('clips', ctx.params.id); if (!c) throw new HttpError(404, 'ไม่พบคลิป');
   sendFile(ctx.req, ctx.res, path.join(UPLOADS, c.file), 'video/mp4');
 });
-route('GET', '/media/thumb/:id', {}, (ctx) => {
+route('GET', '/media/thumb/:id', { auth: false }, (ctx) => {
   const c = store.find('clips', ctx.params.id); if (!c?.thumb) throw new HttpError(404, 'ไม่พบภาพปก');
   sendFile(ctx.req, ctx.res, path.join(THUMBS, c.thumb), 'image/jpeg');
 });
@@ -458,9 +476,10 @@ const handler = async (req, res) => {
     const r = routes.find((x) => x.method === req.method && x.re.test(pathname));
     if (r) {
       const ctx = { req, res, url, params: r.re.exec(pathname).groups || {} };
+      // อ่านเซสชันเสมอ (เส้นทาง auth:false จะได้รู้ว่าใครล็อกอินอยู่ถ้ามี) แต่บังคับล็อกอินเฉพาะเส้นทางที่ไม่ได้ปิด auth
+      const sess = readSession(parseCookies(req.headers.cookie)[COOKIE]);
+      ctx.user = sess ? store.find('users', sess.uid) : undefined;
       if (r.opts.auth !== false) {
-        const s = readSession(parseCookies(req.headers.cookie)[COOKIE]);
-        ctx.user = s && store.find('users', s.uid);
         if (!ctx.user) throw new HttpError(401, 'กรุณาเข้าสู่ระบบ');
         if (r.opts.admin && ctx.user.role !== 'admin') throw new HttpError(403, 'เฉพาะผู้ดูแลระบบ');
       }

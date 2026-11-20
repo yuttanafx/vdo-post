@@ -31,7 +31,7 @@ const start = async (env) => {
   const anon = async (p, o) => fetch(`http://localhost:${PORT}${p}`, { method: o?.method || 'GET', headers: { 'Content-Type': 'application/json' }, body: o?.body && JSON.stringify(o.body) });
   await req('/api/auth/login', { method: 'POST', body: { email: 'admin@klangklip.local', password: 'adminpass1' } });
   const clip = (await req('/api/admin/clips?' + new URLSearchParams({ title: 'โปรมพร้อม', product: 'PROMPROM Inulin', caption: 'แคปชันเดิม' }), { method: 'POST', raw: video, headers: { 'Content-Type': 'video/mp4' } })).body.clip;
-  return { req, anon, clip, stop: () => { srv.kill(); fs.rmSync(dataDir, { recursive: true, force: true }); } };
+  return { req, anon, clip, port: PORT, dataDir, stop: () => { srv.kill(); fs.rmSync(dataDir, { recursive: true, force: true }); } };
 };
 
 let pass = 0;
@@ -90,9 +90,50 @@ try {
   });
 } finally { M.stop(); }
 
-const L = await start({ PLATFORM_MODE: 'live', ANTHROPIC_API_KEY: '' });
+const L = await start({ PLATFORM_MODE: 'live', ANTHROPIC_API_KEY: '', ANTHROPIC_BASE_URL: `http://localhost:${fake.address().port}` });
 try {
   await t('ไม่มีคีย์ + โหมด live → ปิดฟีเจอร์ (501) และ UI รู้ว่า off', async () => {
     assert.equal((await gen(L)).status, 501); assert.equal((await L.req('/api/me')).body.aiCaption, 'off');
+  });
+  // ---- API key ของใครของมัน ----
+  const port = L.port;
+  const join = async (name) => {
+    const r = await fetch(`http://localhost:${port}/api/auth/register`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, email: `${name}@t.local`, password: 'password123' }) });
+    const ck = r.headers.get('set-cookie').split(';')[0];
+    return (p, o = {}) => fetch(`http://localhost:${port}${p}`, { method: o.method || 'GET', headers: { 'Content-Type': 'application/json', Cookie: ck }, body: o.body && JSON.stringify(o.body) }).then(async (x) => ({ status: x.status, body: await x.json().catch(() => ({})) }));
+  };
+  const KEY_A = 'sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA1111', KEY_B = 'sk-ant-api03-BBBBBBBBBBBBBBBBBBBBBBBB2222';
+  const ua = await join('alice'), ub = await join('bob');
+  const gm = (u) => u('/api/captions/generate', { method: 'POST', body: { clipId: L.clip.id, tone: 'สนุก' } });
+  behavior = 'ok';
+  await t('สมาชิกยังไม่มีคีย์ → off (501) / ไม่ล็อกอินใส่คีย์ไม่ได้ / คีย์รูปแบบผิดถูกปฏิเสธ', async () => {
+    assert.equal((await gm(ua)).status, 501);
+    assert.equal((await L.anon('/api/me/ai-key', { method: 'PUT', body: { key: KEY_A } })).status, 401);
+    for (const bad of ['', 'abc', 'sk-short', `${KEY_A} x`, 'sk-<script>aaaaaaaaaaaaaaaaaaaaaaaa']) assert.equal((await ua('/api/me/ai-key', { method: 'PUT', body: { key: bad } })).status, 400, bad);
+  });
+  await t('ใส่คีย์ของตัวเอง → ใช้ได้ / ไม่รั่วคีย์ออกหน้าเว็บ / อีกคนยังใช้ไม่ได้', async () => {
+    const put = await ua('/api/me/ai-key', { method: 'PUT', body: { key: KEY_A } });
+    assert.equal(put.status, 200); assert.deepEqual(put.body.aiKey, { set: true, hint: '1111' });
+    const me = await ua('/api/me'); assert.equal(me.body.aiCaption, 'ai'); assert.deepEqual(me.body.aiKey, { set: true, hint: '1111' });
+    assert.ok(!JSON.stringify(me.body).includes('AAAAAAAA'), 'คีย์ต้องไม่ถูกส่งกลับ');
+    const r = await gm(ua); assert.equal(r.status, 200, JSON.stringify(r.body)); assert.equal(calls.at(-1).headers['x-api-key'], KEY_A);
+    assert.equal((await gm(ub)).status, 501); assert.equal((await ub('/api/me')).body.aiKey.set, false);
+    assert.ok(!JSON.stringify((await L.req('/api/admin/overview')).body).includes('1111'), 'แอดมินต้องไม่เห็นคีย์/ส่วนท้ายคีย์ของสมาชิก');
+  });
+  await t('สองคนใช้คีย์ของใครของมัน', async () => {
+    await ub('/api/me/ai-key', { method: 'PUT', body: { key: KEY_B } });
+    await gm(ub); assert.equal(calls.at(-1).headers['x-api-key'], KEY_B);
+    await gm(ua); assert.equal(calls.at(-1).headers['x-api-key'], KEY_A);
+  });
+  await t('คีย์ถูกเก็บแบบเข้ารหัส (ไม่มีข้อความคีย์ในฐานข้อมูล)', async () => {
+    const db = fs.readFileSync(path.join(L.dataDir, 'db.json'), 'utf8');
+    assert.ok(!db.includes('AAAAAAAAAAAA') && !db.includes('BBBBBBBBBBBB')); assert.ok(db.includes('aiKeyEnc'));
+  });
+  await t('คีย์ของสมาชิกผิด → ข้อความชี้ไปที่ "บัญชีของฉัน" ไม่ใช่ผู้ดูแล', async () => {
+    behavior = 'auth'; const r = await gm(ua); assert.equal(r.status, 502); assert.match(r.body.error, /บัญชีของฉัน/); assert.ok(!r.body.error.includes('ANTHROPIC_API_KEY')); behavior = 'ok';
+  });
+  await t('ลบคีย์ → กลับเป็น off', async () => {
+    const d = await ua('/api/me/ai-key', { method: 'DELETE' }); assert.deepEqual(d.body.aiKey, { set: false, hint: null });
+    assert.equal((await gm(ua)).status, 501); assert.equal((await ua('/api/me')).body.aiCaption, 'off');
   });
 } finally { L.stop(); fake.close(); console.log(`\nผ่าน ${pass} ชุด${process.exitCode ? ' (มีที่ล้มเหลว)' : ''}`); }

@@ -49,11 +49,16 @@ async function loadOverview() { S.overview = S.me.role === 'admin' ? await api('
 async function boot() {
   try {
     const me = await api('/api/me');
-    Object.assign(S, { me: me.user, platforms: me.platforms, mode: me.mode, connect: me.connect, aiCaption: me.aiCaption });
-    await Promise.all([loadClips(), loadAccounts(), loadPosts()]);
+    Object.assign(S, { me: me.user, platforms: me.platforms, mode: me.mode, connect: me.connect, aiCaption: me.aiCaption, aiKey: me.aiKey || { set: false } });
+    await Promise.all([loadClips(), ...(S.me ? [loadAccounts(), loadPosts()] : [])]);
   } catch { S.me = null; }
   render();
-  if (S.me) handleOAuthReturn();
+  if (S.me) {
+    handleOAuthReturn();
+    // ล็อกอินสำเร็จจากป๊อปอัพ → ทำสิ่งที่ค้างไว้ต่อ (เช่น เปิดหน้าตั้งเวลาโพสต์ของคลิปที่กด)
+    const next = S.afterLogin; S.afterLogin = null;
+    if (next) next();
+  }
 }
 
 // กลับจาก Facebook OAuth: #fbpick=<id> → เลือกเพจ, #fb=denied|error|nopages → แจ้งผล
@@ -83,7 +88,7 @@ async function openPagePicker(id) {
 
 // ---------- render ----------
 function render() {
-  if (!S.me) return renderAuth();
+  if (!S.me) return renderGuest();
   const tabs = [['library', 'คลังคลิป'], ['queue', 'คิวโพสต์'], ['accounts', 'บัญชีของฉัน'], ...(S.me.role === 'admin' ? [['admin', 'ผู้ดูแล']] : [])];
   const pending = S.posts.filter((p) => p.status === 'scheduled').length;
   $app.innerHTML = `
@@ -98,36 +103,67 @@ function render() {
   ({ library: viewLibrary, queue: viewQueue, accounts: viewAccounts, admin: viewAdmin })[S.tab]();
 }
 
-function renderAuth() {
-  const reg = S.authMode === 'register';
-  $app.innerHTML = `<div class="auth"><form class="card" id="authForm">
-    <div class="logo"><i></i>คลังคลิป</div>
-    <p class="sub">${reg ? 'สมัครสมาชิกเพื่อตั้งเวลาโพสต์คลิป' : 'เข้าสู่ระบบเพื่อจัดคิวโพสต์คลิป'}</p>
+// ผู้เยี่ยมชมที่ยังไม่ล็อกอิน: เห็นคลังคลิปได้เลย ล็อกอินเมื่อจะตั้งเวลาโพสต์เท่านั้น
+function renderGuest() {
+  S.tab = 'library';
+  $app.innerHTML = `
+    <header class="topbar"><div class="topbar-in">
+      <div class="logo"><i></i>คลังคลิป</div>
+      <div class="nav"></div>
+      <div class="who"><button class="btn sm" id="gLogin">เข้าสู่ระบบ</button><button class="btn sm primary" id="gReg">สมัครสมาชิก</button></div>
+    </div></header>
+    <main id="view"></main>`;
+  $app.querySelector('#gLogin').onclick = () => openAuthModal('login');
+  $app.querySelector('#gReg').onclick = () => openAuthModal('register');
+  viewLibrary();
+}
+
+// ถ้ายังไม่ล็อกอิน เด้งป๊อปอัพให้ล็อกอินก่อน แล้วค่อยทำ next() ต่อหลังล็อกอินสำเร็จ
+function requireLogin(next) {
+  if (S.me) return next();
+  openAuthModal('login', next);
+}
+
+function openAuthModal(mode = 'login', next = null) {
+  S.authMode = mode; S.afterLogin = next;
+  const m = modal('', { wide: true });
+  const box = m.el.querySelector('.modal');
+  const draw = () => {
+    const reg = S.authMode === 'register';
+    box.innerHTML = `<div class="logo"><i></i>คลังคลิป</div>
+    <p class="sub">${reg ? 'สมัครสมาชิกเพื่อตั้งเวลาโพสต์คลิป' : next ? 'เข้าสู่ระบบเพื่อตั้งเวลาโพสต์คลิป' : 'เข้าสู่ระบบเพื่อจัดคิวโพสต์คลิป'}</p>
+    <form id="authForm">
     ${reg ? '<label class="f"><span>ชื่อ</span><input type="text" name="name" required maxlength="100" autocomplete="name"></label>' : ''}
     <label class="f"><span>อีเมล</span><input type="email" name="email" required autocomplete="email"></label>
     <label class="f"><span>รหัสผ่าน</span><input type="password" name="password" required minlength="${reg ? 8 : 1}" autocomplete="${reg ? 'new-password' : 'current-password'}">${reg ? '<div class="hint">อย่างน้อย 8 ตัวอักษร</div>' : ''}</label>
     <p class="err-msg" id="authErr" role="alert"></p>
     <button class="btn primary" style="width:100%">${reg ? 'สมัครสมาชิก' : 'เข้าสู่ระบบ'}</button>
-    <div class="switch">${reg ? 'มีบัญชีแล้ว?' : 'ยังไม่มีบัญชี?'} <button type="button" class="link" id="swap">${reg ? 'เข้าสู่ระบบ' : 'สมัครสมาชิก'}</button></div>
-  </form></div>`;
-  $app.querySelector('#swap').onclick = () => { S.authMode = reg ? 'login' : 'register'; renderAuth(); };
-  $app.querySelector('#authForm').onsubmit = async (e) => {
-    e.preventDefault();
-    const body = Object.fromEntries(new FormData(e.target));
-    try {
-      await api(`/api/auth/${reg ? 'register' : 'login'}`, { method: 'POST', body });
-      await boot();
-    } catch (err) { $app.querySelector('#authErr').textContent = err.message; }
+    </form>
+    <div class="switch">${reg ? 'มีบัญชีแล้ว?' : 'ยังไม่มีบัญชี?'} <button type="button" class="link" id="swap">${reg ? 'เข้าสู่ระบบ' : 'สมัครสมาชิก'}</button> · <button type="button" class="link" id="authCancel">ไว้ก่อน</button></div>`;
+    box.querySelector('#swap').onclick = () => { S.authMode = reg ? 'login' : 'register'; draw(); };
+    box.querySelector('#authCancel').onclick = () => { S.afterLogin = null; m.close(); };
+    box.querySelector('#authForm').onsubmit = async (e) => {
+      e.preventDefault();
+      const body = Object.fromEntries(new FormData(e.target));
+      const btn = e.target.querySelector('button.primary'); btn.disabled = true;
+      try {
+        await api(`/api/auth/${reg ? 'register' : 'login'}`, { method: 'POST', body });
+        m.close();
+        await boot();
+      } catch (err) { box.querySelector('#authErr').textContent = err.message; btn.disabled = false; }
+    };
+    box.querySelector('input')?.focus();
   };
+  draw();
 }
 
 // ---------- library ----------
 function viewLibrary() {
-  const admin = S.me.role === 'admin';
+  const admin = S.me?.role === 'admin';
   const v = document.getElementById('view');
   v.innerHTML = `
     <div class="page-head">
-      <div><h1>คลังคลิป</h1><p>เลือกคลิปที่ต้องการ แล้วกดตั้งเวลาโพสต์ลง TikTok / Facebook / Instagram</p></div>
+      <div><h1>คลังคลิป</h1><p>${S.me ? 'เลือกคลิปที่ต้องการ แล้วกดตั้งเวลาโพสต์ลง TikTok / Facebook / Instagram' : 'ดูคลิปได้เลย — เข้าสู่ระบบเมื่อต้องการตั้งเวลาโพสต์ลง TikTok / Facebook / Instagram'}</p></div>
       <div class="row"><input type="search" id="q" placeholder="ค้นหาชื่อ สินค้า แฮชแท็ก" value="${esc(S.q)}" style="width:240px" aria-label="ค้นหาคลิป">${admin ? '<button class="btn primary" id="addClip">+ เพิ่มคลิป</button>' : ''}</div>
     </div>
     ${S.clips.length ? `<div class="grid">${S.clips.map(clipCard).join('')}</div>` : `<div class="card empty"><h3>${S.q ? 'ไม่พบคลิปที่ค้นหา' : 'ยังไม่มีคลิปในคลัง'}</h3>${admin && !S.q ? 'กด "+ เพิ่มคลิป" เพื่ออัปโหลดคลิปแรก' : S.q ? '' : 'รอผู้ดูแลเพิ่มคลิป'}</div>`}
@@ -149,7 +185,7 @@ function viewLibrary() {
 }
 
 function clipCard(c) {
-  const admin = S.me.role === 'admin';
+  const admin = S.me?.role === 'admin';
   const tags = (c.hashtags || []).slice(0, 3).map((h) => `#${esc(h)}`).join(' ');
   return `<article class="card clip ${S.selected.has(c.id) ? 'sel' : ''}">
     <button class="thumb" data-play="${c.id}" style="${c.thumbUrl ? `background-image:url('${c.thumbUrl}')` : ''}" aria-label="ดูตัวอย่าง ${esc(c.title)}"><span class="play"></span>${c.duration ? `<span class="dur">${fmtDur(c.duration)}</span>` : ''}</button>
@@ -195,28 +231,31 @@ function openEditClip(id) {
 // ---------- AI caption ----------
 const TONES = ['ขายตรง กระตุ้นให้ซื้อ', 'สนุก เป็นกันเอง', 'รีวิวจริงใจ น่าเชื่อถือ', 'พรีเมียม สุภาพ'];
 function aiBoxHtml() {
-  if (S.aiCaption === 'off') return '<div class="ai"><button type="button" class="btn sm" disabled>✨ สร้างแคปชันด้วย AI</button><div class="hint">ยังไม่เปิดใช้ — ผู้ดูแลต้องตั้ง ANTHROPIC_API_KEY ที่เซิร์ฟเวอร์</div></div>';
+  if (S.aiCaption === 'off') return '<div class="ai"><button type="button" class="btn sm" disabled>✨ AI คิดคอนเทนต์ให้</button><div class="hint">ยังไม่ได้ใส่ API key ของคุณ — <button type="button" class="link" data-ai-setup>ไปใส่ที่ "บัญชีของฉัน"</button></div></div>';
   return `<div class="ai">
-    <div class="row"><select data-ai-tone aria-label="น้ำเสียงแคปชัน" style="width:auto;flex:1">${TONES.map((t) => `<option>${esc(t)}</option>`).join('')}</select><button type="button" class="btn sm primary" data-ai-go>✨ สร้างแคปชันด้วย AI</button></div>
+    <div class="row"><select data-ai-tone aria-label="น้ำเสียงแคปชัน" style="width:auto;flex:1">${TONES.map((t) => `<option>${esc(t)}</option>`).join('')}</select><button type="button" class="btn sm primary" data-ai-go>✨ AI คิดคอนเทนต์ให้</button></div>
     <input type="text" data-ai-hint maxlength="300" placeholder="บอก AI เพิ่มเติม (ไม่บังคับ) เช่น กลุ่มลูกค้าคือคนทำงานออฟฟิศ" style="margin-top:8px" aria-label="ข้อมูลเพิ่มเติมสำหรับ AI">
+    <div class="hint" style="margin-top:6px">AI จะดูภาพจากในคลิปและข้อมูลสินค้า แล้วเสนอคอนเทนต์ 3 แบบให้เลือกแนบกับคลิป${S.aiKey?.set ? '' : ' · (ยังไม่ได้ใส่ API key ของคุณ)'}</div>
     <div data-ai-out aria-live="polite"></div></div>`;
 }
 function wireAi(root, clipId, textarea) {
+  root.querySelector('[data-ai-setup]')?.addEventListener('click', () => { root.querySelector('[data-close]')?.click(); S.tab = 'accounts'; render(); });
   const go = root.querySelector('[data-ai-go]'); if (!go) return;
   const out = root.querySelector('[data-ai-out]');
   go.addEventListener('click', async () => {
-    go.disabled = true; go.textContent = '✨ กำลังคิดแคปชัน…'; out.innerHTML = '';
+    go.disabled = true; go.textContent = '✨ กำลังดูคลิปและคิดคอนเทนต์…'; out.innerHTML = '';
     try {
       const r = await api('/api/captions/generate', { method: 'POST', body: { clipId, tone: root.querySelector('[data-ai-tone]').value, hint: root.querySelector('[data-ai-hint]').value } });
-      out.innerHTML = `<div class="hint" style="margin:8px 0 4px">${r.mock ? 'ตัวอย่างจำลอง (ยังไม่ได้ใส่ ANTHROPIC_API_KEY) — ' : ''}เลือกแบบที่ชอบ แล้วแก้ไขต่อได้</div>${r.captions.map((c, i) => `<button type="button" class="ai-opt" data-i="${i}">${esc(c)}</button>`).join('')}`;
+      out.innerHTML = `<div class="hint" style="margin:8px 0 4px">${r.mock ? 'ตัวอย่างจำลอง (ยังไม่ได้ใส่ API key) — ' : ''}กดเลือกแบบที่ชอบเพื่อแนบเป็นแคปชันของคลิปนี้ แล้วแก้ไขต่อได้</div>${r.captions.map((c, i) => `<button type="button" class="ai-opt" data-i="${i}">${esc(c)}</button>`).join('')}`;
       out.querySelectorAll('.ai-opt').forEach((b) => b.addEventListener('click', () => { textarea.value = r.captions[b.dataset.i]; out.querySelectorAll('.ai-opt').forEach((x) => x.classList.toggle('on', x === b)); textarea.focus(); }));
     } catch (e) { out.innerHTML = `<div class="err-msg" style="margin-top:8px" role="alert">${esc(e.message)}</div>`; }
-    go.disabled = false; go.textContent = '✨ สร้างใหม่อีกครั้ง';
+    go.disabled = false; go.textContent = '✨ คิดใหม่อีกครั้ง';
   });
 }
 
 // ---------- schedule ----------
 function openSchedule(clipIds) {
+  if (!S.me) return requireLogin(() => openSchedule(clipIds));
   const clips = clipIds.map((id) => S.clips.find((c) => c.id === id)).filter(Boolean);
   if (!clips.length) return;
   if (!S.accounts.length) {
@@ -312,6 +351,7 @@ function viewAccounts() {
   const v = document.getElementById('view');
   v.innerHTML = `<div class="page-head"><div><h1>บัญชีของฉัน</h1><p>เชื่อมบัญชีโซเชียลของคุณเพื่อให้ระบบโพสต์แทน</p></div></div>
     ${S.mode === 'mock' ? '<div class="notice"><b>โหมดทดลอง:</b> การเชื่อมบัญชีและการโพสต์เป็นการจำลอง ยังไม่ได้ส่งขึ้น TikTok/Facebook/Instagram จริง</div>' : ''}
+    ${aiKeyCard()}
     <div class="cols">${Object.entries(S.platforms).map(([k, p]) => {
       const mine = S.accounts.filter((a) => a.platform === k);
       return `<section class="card plat"><h3><span class="badge ${k}">${esc(p.label)}</span></h3>
@@ -319,8 +359,29 @@ function viewAccounts() {
         ${connectBox(k, p, mine)}
         ${k === 'facebook' ? '<div class="hint">โพสต์ลงเพจ (Page) เท่านั้น ไม่รองรับโปรไฟล์ส่วนตัว</div>' : k === 'instagram' ? '<div class="hint">ต้องเป็นบัญชีธุรกิจ/Creator ที่ผูกกับเพจ Facebook</div>' : '<div class="hint">รองรับรหัสสินค้าสำหรับปักตะกร้าตอนตั้งเวลา</div>'}</section>`;
     }).join('')}</div>`;
+  wireAiKey(v);
   v.querySelectorAll('[data-connect]').forEach((f) => f.addEventListener('submit', guard(async (e) => { e.preventDefault(); await api('/api/accounts/connect', { method: 'POST', body: { platform: f.dataset.connect, displayName: new FormData(f).get('displayName') } }); await loadAccounts(); viewAccounts(); toast('เชื่อมบัญชีแล้ว'); })));
   v.querySelectorAll('[data-unlink]').forEach((b) => b.addEventListener('click', guard(async () => { if (!confirm('ยกเลิกการเชื่อมบัญชีนี้?')) return; await api(`/api/accounts/${b.dataset.unlink}`, { method: 'DELETE' }); await loadAccounts(); viewAccounts(); toast('ยกเลิกการเชื่อมแล้ว'); })));
+}
+
+// ---------- AI API key (ของใครของมัน) ----------
+function aiKeyCard() {
+  const k = S.aiKey || {};
+  return `<section class="card plat" style="margin-bottom:16px"><h3>✨ AI คิดคอนเทนต์ — API key ของคุณ</h3>
+    <p class="hint" style="margin-top:0">ใส่ Anthropic API key ของคุณเอง ระบบจะใช้คีย์นี้ให้ AI ดูภาพในคลิปแล้วคิดคอนเทนต์/แคปชันให้เลือกแนบกับคลิป ค่าใช้จ่ายคิดกับบัญชี Anthropic ของคุณ (สร้างคีย์ที่ console.anthropic.com) คีย์เก็บแบบเข้ารหัสบนเซิร์ฟเวอร์และไม่ถูกส่งกลับมาแสดงอีก</p>
+    ${k.set ? `<div class="acc"><div><b>ใส่คีย์แล้ว</b> <span class="hint" style="margin:0">ลงท้ายด้วย …${esc(k.hint)}</span></div><button class="btn sm danger" id="aiKeyDel">ลบคีย์</button></div>` : ''}
+    <form id="aiKeyForm" class="row" style="margin-top:10px"><input type="password" name="key" placeholder="${k.set ? 'ใส่คีย์ใหม่เพื่อเปลี่ยน' : 'sk-ant-...'}" autocomplete="off" spellcheck="false" required aria-label="Anthropic API key" style="flex:1"><button class="btn primary">${k.set ? 'เปลี่ยนคีย์' : 'บันทึกคีย์'}</button></form>
+    <p class="err-msg" id="aiKeyErr" role="alert"></p>
+    ${S.mode === 'mock' && !k.set ? '<div class="hint">โหมดทดลอง: ถ้ายังไม่ใส่คีย์ ปุ่ม AI จะให้ตัวอย่างจำลอง</div>' : ''}</section>`;
+}
+async function refreshAi() { const me = await api('/api/me'); S.aiCaption = me.aiCaption; S.aiKey = me.aiKey || { set: false }; }
+function wireAiKey(v) {
+  v.querySelector('#aiKeyForm')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try { await api('/api/me/ai-key', { method: 'PUT', body: { key: new FormData(e.target).get('key') } }); await refreshAi(); viewAccounts(); toast('บันทึก API key แล้ว'); }
+    catch (err) { v.querySelector('#aiKeyErr').textContent = err.message; }
+  });
+  v.querySelector('#aiKeyDel')?.addEventListener('click', guard(async () => { if (!confirm('ลบ API key ของคุณ?')) return; await api('/api/me/ai-key', { method: 'DELETE' }); await refreshAi(); viewAccounts(); toast('ลบ API key แล้ว'); }));
 }
 
 // ---------- admin ----------

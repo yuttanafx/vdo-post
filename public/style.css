@@ -147,3 +147,8 @@ a.btn { color: inherit; text-decoration: none; display: inline-flex; align-items
 .ai-opt:hover { border-color: var(--brand); }
 .ai-opt.on { border-color: var(--brand); background: var(--brand-soft); }
 .ai-opt:focus-visible { outline: 3px solid color-mix(in srgb, var(--brand) 45%, transparent); outline-offset: 2px; }
+
+/* ป๊อปอัพล็อกอิน (ผู้เยี่ยมชมกดตั้งเวลาโพสต์) */
+.modal > .logo { margin-bottom: 4px; font-size: 22px; }
+.modal > p.sub { color: var(--muted); margin: 0 0 18px; }
+.modal > .switch { text-align: center; margin-top: 14px; font-size: 14px; }

@@ -76,7 +76,8 @@ try {
     const sessionAsState = cookie.split('=')[1];
     assert.equal((await req(`/api/oauth/facebook/callback?code=abc&state=${sessionAsState}`)).loc, '/#fb=error');
     const stateAsSession = await fetch(BASE + '/api/me', { headers: { Cookie: `kk_sid=${state}` } });
-    assert.equal(stateAsSession.status, 401);
+    assert.equal((await stateAsSession.json()).user, null); // /api/me เปิดให้ผู้เยี่ยมชม → ต้องไม่ถูกมองว่าเป็นผู้ใช้
+    assert.equal((await fetch(BASE + '/api/accounts', { headers: { Cookie: `kk_sid=${state}` } })).status, 401);
     assert.equal(log.filter((l) => l.path.endsWith('/oauth/access_token')).length, 0, 'ต้องไม่เรียก Facebook เมื่อ state ผิด');
   });
   let pick;
